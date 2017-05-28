@@ -1,4 +1,7 @@
 # coding=utf8
+import sys
+import tensorflow as tf
+
 import word2vec
 
 
@@ -7,6 +10,18 @@ flags = word2vec.flags
 flags.DEFINE_string("nce_vector_path", sys.argv[4], "File name for NCE vector sample source")
 flags.DEFINE_string("nce_theta_w_path", sys.argv[5], "File name for NCE theta_w sample source")
 flags.DEFINE_string("nce_theta_b_path", sys.argv[6], "File name for NCE theta_b sample source")
+
+FLAGS = flags.FLAGS
+
+
+class NCE_Options(word2vec.Options):
+    def __init__(self):
+        word2vec.Options.__init__(self)
+        self.nce_path = '1'
+        self.nce_vector_path = FLAGS.nce_vector_path
+        self.nce_theta_w_path = FLAGS.nce_theta_w_path
+        self.nce_theta_b_path = FLAGS.nce_theta_b_path
+
 
 
 class NCE_Word2Vec(Word2Vec):
@@ -193,3 +208,47 @@ class NCE_Word2Vec(Word2Vec):
         return sampled_ids
 
 
+def _start_shell(local_ns=None):
+    # An interactive shell is useful for debugging/development.
+    import IPython
+    user_ns = {}
+    if local_ns:
+        user_ns.update(local_ns)
+    user_ns.update(globals())
+    IPython.start_ipython(argv=[], user_ns=user_ns)
+
+
+def main(_):
+    """Train a word2vec model."""
+    if not FLAGS.train_data or not FLAGS.eval_data or not FLAGS.save_path:
+        print("--train_data --eval_data and --save_path must be specified.")
+        sys.exit(1)
+    opts = NCE_Options()
+    mConfig = tf.ConfigProto(allow_soft_placement=True)
+    mConfig.gpu_options.allocator_type = 'BFC'
+    mConfig.gpu_options.per_process_gpu_memory_fraction=0.8
+    # with tf.Graph().as_default(), tf.Session() as session:
+    with tf.Graph().as_default(), tf.Session(config=mConfig) as session:
+        with tf.device("/cpu:0"):
+            model = Word2Vec(opts, session)
+
+        for epoch in xrange(opts.epochs_to_train):
+            model.train()                               # Process one epoch
+            model.save_vec(FLAGS.vector_path, epoch)  # Save embeddings for current epoch
+
+        # Perform a final save.
+        model.saver.save(session,
+                os.path.join(opts.save_path, "model.ckpt"),
+                global_step=model.global_step)    
+        model.save_vec(FLAGS.vector_path, -1)         # Final save
+                         
+                
+
+        if FLAGS.interactive:
+            # E.g.,
+            # [0]: model.analogy(b'france', b'paris', b'russia')
+            # [1]: model.nearby([b'proton', b'elephant', b'maxwell'])
+            _start_shell(locals())
+
+if __name__ == "__main__":
+    tf.app.run()

@@ -55,23 +55,14 @@ from struct import Struct
 
 
 if len(sys.argv) < 2 or sys.argv[1] == '-h':
-    print('params: [data, model, vector, mode(ori/nce)], nce_path(if mode == "nce")')
+    print('params: [data, model, vector]')
     quit(0)
-
-if sys.argv[4] == 'nce':
-    _mode = 'n'
-else:
-    _mode = 'o'
 
 flags = tf.app.flags
 
 flags.DEFINE_string("train_mode", _mode, "Training mode, n for NCE, o for origin mode")
 
 if _mode == 'n':
-    flags.DEFINE_string("nce_vector_path", sys.argv[5], "File name for NCE vector sample source")
-    flags.DEFINE_string("nce_theta_w_path", sys.argv[6], "File name for NCE theta_w sample source")
-    flags.DEFINE_string("nce_theta_b_path", sys.argv[7], "File name for NCE theta_b sample source")
-
 
 flags.DEFINE_string("vector_path", sys.argv[3], "Directory name to write the embedding vectors.")
 
@@ -122,30 +113,6 @@ flags.DEFINE_integer("checkpoint_interval", 600,
                                          "seconds (rounded up to statistics interval).")
 
 FLAGS = flags.FLAGS
-
-# Useless
-def readbin(f):
-    """ use 'with open('...') as f' first """
-    [vocab_amt, embedding_size] = map(int, f.readline().split())
-
-    myFormat = 's' + 'f' * embedding_size
-
-    rec_struct = Struct(myFormat)
-
-    chunks = iter(lambda: f.read(rec_struct.size), b'')
-    
-    recs = [rec_struct.unpack(chunk) for chunk in chunks]
-    try:
-        for chunk in chunks:
-            rec = rec_struct.unpack(chunk) 
-            rec[1:] =  map(lambda c: c / math.sqrt(sum(map(lambda c: c*c, rec[1:]))), rec[1:])
-            recs.append(rec)
-    except struct.error as e:
-        print("Error: ", e)
-        
-    return recs
-
-
 
 
 class Options(object):
@@ -210,12 +177,6 @@ class Options(object):
         self.train_mode = FLAGS.train_mode
 
         self.nce_path = ''
-        if self.train_mode == 'n':
-            self.nce_path = '1'
-            self.nce_vector_path = FLAGS.nce_vector_path
-            self.nce_theta_w_path = FLAGS.nce_theta_w_path
-            self.nce_theta_b_path = FLAGS.nce_theta_b_path
-
 
 class Word2Vec(object):
     """Word2Vec model (Skipgram)."""
@@ -228,84 +189,12 @@ class Word2Vec(object):
         self._id2word = []
         print('build graph')
         self.build_graph()
-        self.build_eval_graph()
         print('save vocab')
         self.save_vocab()
 
 
 
-    def read_nce(self):
-        opt = self._options
-        nce_vector = []
-        nce_theta_w = []
-        nce_theta_b = []
 
-        if opt.nce_path != '':
-            with open(opt.nce_vector_path, 'r') as f_vector,\
-                    open(opt.nce_theta_w_path, 'r') as f_theta_w,\
-                    open(opt.nce_theta_b_path, 'r') as f_theta_b:
-                for _line in f_vector:
-                    _content = _line.strip().split('\t')
-                    if len(_content) != 2:
-                        continue
-                    _word, _vector = _content
-                    nce_vector.append(map(float, _vector.split(' ')))
-
-                for _line in f_theta_w:
-                    nce_theta_w.append(map(float, _line.split(' ')))
-
-                for _line in f_theta_b:
-                    nce_theta_b.append(float(_line))
-                
-                # All Constant (Used as distribution)
-                
-                # Embedding (trained before at other training set): [vocab_size, emb_dim]
-                self._nce_vector = tf.constant(nce_vector)
-
-                # Theta_w (trained before ... ): [vocab_size, emb_dim]
-                self._nce_theta_w = tf.constant(nce_theta_w)
-
-                # Theta_b (trained before ... ): [1, vocab_size]
-                self._nce_theta_b = tf.constant(nce_theta_b)
-
-        else:
-            print('Error: No nce path determined!')                     
-
-
-
-    def nce_sample(self, labels, batch_emb):
-        """Return NCE sample"""
-        opts = self._options
-
-        # media_matrix=tf.matmul(batch_emb,self._nce_theta_w,transpose_b=True)+self._nce_theta_b  
-        
-        # nce_distribution = tf.reduce_sum(media_matrix, 0) / self._options.batch_size
-        
-        unigrams = [1 for _ in xrange(opts.vocab_size)]
-
-        rough_sampled_ids, _, _ = (tf.nn.fixed_unigram_candidate_sampler(
-                true_classes=labels,
-                num_true=1,
-                num_sampled=opts.num_samples * 5, # in order to find top k
-                unique=True,
-                range_max=opts.vocab_size,
-                distortion=0.75,
-                unigrams=unigrams))
-
-        real_nce_theta_w = tf.nn.embedding_lookup(self._nce_theta_w, rough_sampled_ids)
-        real_nce_theta_b = tf.nn.embedding_lookup(self._nce_theta_b, rough_sampled_ids)
-
-        media_matrix = tf.matmul(batch_emb, real_nce_theta_w, transpose_b=True) + real_nce_theta_b
-
-        rough_sampled_logits = tf.reduce_sum(media_matrix, 0) / self._options.batch_size
-
-        # rough_sampled_logits = tf.nn.embedding_lookup(nce_distribution, rough_sampled_ids)
-
-        _, top_k_sampled_logits_id = tf.nn.top_k(rough_sampled_logits, opts.num_samples)
-
-        sampled_ids = tf.nn.embedding_lookup(rough_sampled_ids, top_k_sampled_logits_id)
-
-        return sampled_ids
 
 
     def forward(self, examples, labels):
@@ -345,19 +234,15 @@ class Word2Vec(object):
         example_emb = tf.nn.embedding_lookup(emb, examples)
 
         # Negative sampling.
-        if opts.train_mode == 'o': 
-            unigrams = opts.vocab_counts.tolist()
-            sampled_ids, _, _ = (tf.nn.fixed_unigram_candidate_sampler(
-                    true_classes=labels_matrix,
-                    num_true=1,
-                    num_sampled=opts.num_samples,
-                    unique=True,
-                    range_max=opts.vocab_size,
-                    distortion=0.75,
-                    unigrams=unigrams))
-        else:
-            sampled_ids = self.nce_sample(labels_matrix, example_emb)
-
+        unigrams = opts.vocab_counts.tolist()
+        sampled_ids, _, _ = (tf.nn.fixed_unigram_candidate_sampler(
+                true_classes=labels_matrix,
+                num_true=1,
+                num_sampled=opts.num_samples,
+                unique=True,
+                range_max=opts.vocab_size,
+                distortion=0.75,
+                unigrams=unigrams))
 
         # Weights for labels: [batch_size, emb_dim]
         true_w = tf.nn.embedding_lookup(sm_w_t, labels)
@@ -416,59 +301,6 @@ class Word2Vec(object):
 
         self._train = train
 
-    def build_eval_graph(self):
-        """Build the eval graph."""
-        # Eval graph
-
-        # Each analogy task is to predict the 4th word (d) given three
-        # words: a, b, c.    E.g., a=italy, b=rome, c=france, we should
-        # predict d=paris.
-
-        # The eval feeds three vectors of word ids for a, b, c, each of
-        # which is of size N, where N is the number of analogies we want to
-        # evaluate in one batch.
-        analogy_a = tf.placeholder(dtype=tf.int64)    # [N]
-        analogy_b = tf.placeholder(dtype=tf.int64)    # [N]
-        analogy_c = tf.placeholder(dtype=tf.int64)    # [N]
-
-        # Normalized word embeddings of shape [vocab_size, emb_dim].
-        nemb = tf.nn.l2_normalize(self._emb, 1)
-
-        # Each row of a_emb, b_emb, c_emb is a word's embedding vector.
-        # They all have the shape [N, emb_dim]
-        a_emb = tf.gather(nemb, analogy_a)    # a's embs
-        b_emb = tf.gather(nemb, analogy_b)    # b's embs
-        c_emb = tf.gather(nemb, analogy_c)    # c's embs
-
-        # We expect that d's embedding vectors on the unit hyper-sphere is
-        # near: c_emb + (b_emb - a_emb), which has the shape [N, emb_dim].
-        target = c_emb + (b_emb - a_emb)
-
-        # Compute cosine distance between each pair of target and vocab.
-        # dist has shape [N, vocab_size].
-        dist = tf.matmul(target, nemb, transpose_b=True)
-
-        # For each question (row in dist), find the top 4 words.
-        _, pred_idx = tf.nn.top_k(dist, 4)
-
-        # Nodes for computing neighbors for a given word according to
-        # their cosine distance.
-        nearby_word = tf.placeholder(dtype=tf.int32)    # word id
-        nearby_emb = tf.gather(nemb, nearby_word)
-        nearby_dist = tf.matmul(nearby_emb, nemb, transpose_b=True)
-        nearby_val, nearby_idx = tf.nn.top_k(nearby_dist,
-                                                                                 min(1000, self._options.vocab_size))
-
-        # Nodes in the construct graph which are used by training and
-        # evaluation to run/feed/fetch.
-        self._analogy_a = analogy_a
-        self._analogy_b = analogy_b
-        self._analogy_c = analogy_c
-        self._analogy_pred_idx = pred_idx
-        self._nearby_word = nearby_word
-        self._nearby_val = nearby_val
-        self._nearby_idx = nearby_idx
-
     def build_graph(self):
         """Build the graph for the full model."""
         opts = self._options
@@ -483,20 +315,6 @@ class Word2Vec(object):
          opts.words_per_epoch) = self._session.run([words, counts, words_per_epoch])
         opts.vocab_size = len(opts.vocab_words)
         
-        
-        print(opts.vocab_size, type(opts.vocab_counts), opts.vocab_counts[0], opts.vocab_counts[1])
-
-        print("Data file: ", opts.train_data)
-        print("Vocab size: ", opts.vocab_size - 1, " + UNK")
-        print("Words per epoch: ", opts.words_per_epoch)
-
-        if opts.train_mode == 'n':
-            print("Load NCE sample...")
-            self.read_nce()
-            print("NCE file: ", opts.nce_path)
-        
-
-
         self._examples = examples
         self._labels = labels
         self._id2word = opts.vocab_words
@@ -575,15 +393,6 @@ class Word2Vec(object):
 
         return epoch
 
-    def _predict(self, analogy):
-        """Predict the top 4 answers for analogy questions."""
-        idx, = self._session.run([self._analogy_pred_idx], {
-                self._analogy_a: analogy[:, 0],
-                self._analogy_b: analogy[:, 1],
-                self._analogy_c: analogy[:, 2]
-        })
-        return idx
-
     def save_vec(self, path, epoch):
         """ Save the current epoch vectors"""
         # param@ path:  the directory to save vector files
@@ -653,3 +462,5 @@ def main(_):
 
 if __name__ == "__main__":
     tf.app.run()
+else: # Being imported
+    pass
